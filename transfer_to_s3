@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# Version 1.0
+
+# Load environment variables from .env file
+source /path/to/file
+
+# Get the directory of the script
+script_dir=$(dirname "$(readlink -f "$0")")
+
+# Variables from .env file
+source_path="/path/to/file"
+retry_count=3
+file_extension="*.zip"
+log_file="${script_dir}/transfer_to_s3_$(date +'%Y-%m-%d').log"
+
+# Debug: Print the environment variables to check if they are correctly loaded
+#echo "AWS_KEY: $AWS_KEY"
+#echo "AWS_SECRET: $AWS_SECRET"
+#echo "AWS_REGION: $AWS_REGION"
+#echo "AWS_BUCKET: $AWS_BUCKET"
+#echo "AWS_URL: $AWS_URL"
+#echo "AWS_ENDPOINT: $AWS_ENDPOINT"
+#echo "AWS_USE_PATH_STYLE_ENDPOINT: $AWS_USE_PATH_STYLE_ENDPOINT"
+
+# Export AWS credentials as environment variables
+export AWS_ACCESS_KEY_ID="$AWS_KEY"
+export AWS_SECRET_ACCESS_KEY="$AWS_SECRET"
+export AWS_DEFAULT_REGION="$AWS_REGION"
+
+# Function to transfer files to S3
+transfer_files_to_s3() {
+  # Check if the folder exists
+  if [ ! -d "$source_path" ]; then
+    echo "The folder does not exist: $source_path" | tee -a "$log_file"
+    exit 1
+  fi
+
+  # Check if any files exist in the defined path
+  files=($source_path/$file_extension)
+  if [ ${#files[@]} -eq 0 ] || [ -z "${files[0]}" ]; then
+    echo "No files found in the defined path: $source_path" | tee -a $log_file
+    exit 1
+  fi
+
+  for file in "${files[@]}"; do
+    file_name=$(basename "$file")
+    s3_file_path="$AWS_BUCKET/$BACKUP_NAME/$file_name"
+
+    # Check if file exists in S3 and if it's the same (size, date, etc.)
+    aws s3api head-object --bucket "$AWS_BUCKET" --key "$BACKUP_NAME/$file_name" --endpoint-url "$AWS_ENDPOINT" > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+      s3_file_size=$(aws s3api head-object --bucket "$AWS_BUCKET" --key "$BACKUP_NAME/$file_name" --endpoint-url "$AWS_ENDPOINT" --query 'ContentLength' --output text)
+      local_file_size=$(stat -c%s "$file")
+      if [ "$s3_file_size" -eq "$local_file_size" ]; then
+        echo "File $file_name already exists in S3 and is the same. Aborting transfer." | tee -a $log_file
+        continue
+      fi
+    fi
+
+    # Retry mechanism for transferring file to S3
+    retries=0
+    while [ $retries -lt $retry_count ]; do
+      echo "Transferring $file to S3: $s3_file_path"
+      aws s3 cp "$file" "s3://$AWS_BUCKET/$BACKUP_NAME/$file_name" --endpoint-url "$AWS_ENDPOINT"
+      if [ $? -eq 0 ]; then
+        echo "Successfully transferred $file to S3." | tee -a $log_file
+        break
+      else
+        retries=$((retries + 1))
+        echo "Failed to transfer $file to S3. Retrying ($retries/$retry_count)..." | tee -a $log_file
+        sleep 5
+      fi
+    done
+
+    if [ $retries -eq $retry_count ]; then
+      echo "Failed to transfer $file to S3 after $retry_count attempts. Aborting." | tee -a $log_file
+      exit 1
+    fi
+  done
+}
+
+# Run the file transfer function
+echo "$(date +'%Y-%m-%d %H:%M:%S') Script Start..." | tee -a $log_file
+echo "BACKUP_NAME: $BACKUP_NAME" | tee -a $log_file
+transfer_files_to_s3
+echo "$(date +'%Y-%m-%d %H:%M:%S') Script End..." | tee -a $log_file
+echo "" | tee -a $log_file
