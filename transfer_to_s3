@@ -2,26 +2,17 @@
 
 # Version 1.0
 
-# Load environment variables from .env file
-source /path/to/file
-
 # Get the directory of the script
 script_dir=$(dirname "$(readlink -f "$0")")
+
+# Load environment variables from .env file
+source "${script_dir}/transfer_to_s3.env"
 
 # Variables from .env file
 source_path="/path/to/file"
 retry_count=3
 file_extension="*.zip"
 log_file="${script_dir}/transfer_to_s3_$(date +'%Y-%m-%d').log"
-
-# Debug: Print the environment variables to check if they are correctly loaded
-#echo "AWS_KEY: $AWS_KEY"
-#echo "AWS_SECRET: $AWS_SECRET"
-#echo "AWS_REGION: $AWS_REGION"
-#echo "AWS_BUCKET: $AWS_BUCKET"
-#echo "AWS_URL: $AWS_URL"
-#echo "AWS_ENDPOINT: $AWS_ENDPOINT"
-#echo "AWS_USE_PATH_STYLE_ENDPOINT: $AWS_USE_PATH_STYLE_ENDPOINT"
 
 # Export AWS credentials as environment variables
 export AWS_ACCESS_KEY_ID="$AWS_KEY"
@@ -43,6 +34,9 @@ transfer_files_to_s3() {
     exit 1
   fi
 
+  # Keep 3 latest files on local
+  latest_files=($(ls -t "$source_path"/*$file_extension | head -n 3))
+
   for file in "${files[@]}"; do
     file_name=$(basename "$file")
     s3_file_path="$AWS_BUCKET/$BACKUP_NAME/$file_name"
@@ -53,8 +47,15 @@ transfer_files_to_s3() {
       s3_file_size=$(aws s3api head-object --bucket "$AWS_BUCKET" --key "$BACKUP_NAME/$file_name" --endpoint-url "$AWS_ENDPOINT" --query 'ContentLength' --output text)
       local_file_size=$(stat -c%s "$file")
       if [ "$s3_file_size" -eq "$local_file_size" ]; then
-        echo "File $file_name already exists in S3 and is the same. Aborting transfer." | tee -a $log_file
-        continue
+        # Check if the file is not in the list of latest file
+        if ! echo "${latest_files[@]}" | grep -q "$file_name"; then
+          echo "File $file_name already exists in S3 and is the same. Deleting local file and aborting transfer" | tee -a $log_file
+          rm -f "$file" # Delete old files
+          continue
+        else
+          echo "File $file_name already exists in S3 and is the same. Keeping local file and aborting transfer" | tee -a $log_file
+          continue
+        fi
       fi
     fi
 
